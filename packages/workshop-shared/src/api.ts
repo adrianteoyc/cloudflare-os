@@ -423,6 +423,21 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Mark the onboarding wizard as completed. */
   completeOnboarding(): Promise<void>;
 
+  // --- Family Memory Book fork: create-family onboarding (docs/UPSTREAM.md) ---
+
+  /**
+   * The create-family onboarding status check, truthful for every user including admins (whether
+   * an admin is *routed* there automatically is a frontend concern, not this method's). True means
+   * the user has no family yet.
+   */
+  checkFamilyOnboarding(): Promise<{ needsCreateFamily: boolean }>;
+
+  /**
+   * Creates the signed-in user's family (a Clerk organization, with them as its owner). Throws if
+   * they already belong to one.
+   */
+  createFamily(familyName: string): Promise<void>;
+
   // --- Optional Cloudflare limits / top-up flow (only meaningful when enabled server-side) ---
 
   /** Get the user's current free-tier usage and connected-account balance. */

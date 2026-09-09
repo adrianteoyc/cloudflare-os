@@ -7,7 +7,6 @@ import { useEffect, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { logRpcFailure } from './rpcErrors'
-import { asFamilyOnboardingApi } from './familyOnboardingApi'
 import { resolveOnboardingGate, OnboardingGateDecision } from './onboardingGate'
 
 /** `resolveOnboardingGate`'s own outcomes, plus 'error' -- the check itself never produces this;
@@ -79,7 +78,7 @@ export function useOnboardingGate(
         const [isAdmin, upstreamOnboardingCompleted, familyStatus] = await Promise.all([
           authenticatedApi.amIAdmin(),
           authenticatedApi.isOnboardingCompleted(),
-          asFamilyOnboardingApi(authenticatedApi).checkFamilyOnboarding(),
+          authenticatedApi.checkFamilyOnboarding(),
         ])
         if (cancelled) return
         setNeedsCreateFamily(familyStatus.needsCreateFamily)

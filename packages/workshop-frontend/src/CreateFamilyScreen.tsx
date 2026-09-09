@@ -6,7 +6,6 @@ import { useState, FormEvent } from 'react'
 import { Input, Button, Banner } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { asFamilyOnboardingApi } from './familyOnboardingApi'
 import { useDocumentTitle } from './useDocumentTitle'
 
 interface CreateFamilyScreenProps {
@@ -28,7 +27,7 @@ export default function CreateFamilyScreen({ authenticatedApi, onComplete }: Cre
     setError(null)
 
     try {
-      await asFamilyOnboardingApi(authenticatedApi).createFamily(name)
+      await authenticatedApi.createFamily(name)
       onComplete()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create your family.')
