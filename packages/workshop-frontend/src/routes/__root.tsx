@@ -1,5 +1,4 @@
-import { logRpcFailure } from '../rpcErrors'
-import { useState, useEffect } from 'react'
+import { useEffect } from 'react'
 import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
@@ -7,7 +6,7 @@ import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useRpcStub, useConnectionLost } from '../RpcContext'
 import { markConnectionRestored } from '../main'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
-import { AuthProvider, useAuthenticatedApi } from '../AuthContext'
+import { AuthProvider } from '../AuthContext'
 import { FeatureFlagsProvider } from '../FeatureFlagsContext'
 import Header from '../components/Header'
 import AppShell from '../components/AppShell/AppShell'
@@ -15,8 +14,7 @@ import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 // Family Memory Book fork: see docs/UPSTREAM.md's "Create-family onboarding integration" note.
 import CreateFamilyScreen from '../CreateFamilyScreen'
-import { asFamilyOnboardingApi } from '../familyOnboardingApi'
-import { resolveOnboardingGate, OnboardingGateDecision } from '../onboardingGate'
+import { useOnboardingGate } from '../useOnboardingGate'
 import { FamilyOnboardingProvider } from '../FamilyOnboardingContext'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 
@@ -130,8 +128,7 @@ function RootComponent() {
 
 /**
  * Inner shell that checks onboarding status and either shows upstream's wizard, the Family Memory
- * Book "Create your family" screen, or the normal app chrome. Lives inside AuthProvider so both
- * screens can use useAuthenticatedApi().
+ * Book "Create your family" screen, or the normal app chrome.
  */
 function AuthenticatedShell({
   authenticatedApi,
@@ -140,54 +137,11 @@ function AuthenticatedShell({
   authenticatedApi: RpcStub<AuthenticatedApi>
   isWorkspaceEditor: boolean
 }) {
-  const { isAdmin } = useAuthenticatedApi()
-  // null = still checking
-  const [gate, setGate] = useState<OnboardingGateDecision | null>(null)
-  // Ground truth from checkFamilyOnboarding(), independent of `gate`: an admin's `gate` is never
-  // 'create-family' (resolveOnboardingGate never auto-routes them there), but they still need to
-  // know whether they have a family, to decide whether UserMenu's manual entry point shows.
-  const [needsCreateFamily, setNeedsCreateFamily] = useState(false)
-  // Set true when the manual "Create your family" entry (FamilyOnboardingContext.openCreateFamily,
-  // e.g. from UserMenu) is used, rather than the automatic gate landing on 'create-family'.
-  const [manualCreateFamily, setManualCreateFamily] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function check() {
-      try {
-        // Family Memory Book fork: checkFamilyOnboarding() is not part of upstream's
-        // AuthenticatedApi -- see docs/UPSTREAM.md's "Create-family onboarding integration" note.
-        // Always fetched alongside isOnboardingCompleted(), admins included: resolveOnboardingGate
-        // is what keeps admins off the automatic 'create-family' route, not this call -- an admin's
-        // own needsCreateFamily is still true reporting, used below for the manual entry point.
-        const [upstreamOnboardingCompleted, familyStatus] = await Promise.all([
-          authenticatedApi.isOnboardingCompleted(),
-          asFamilyOnboardingApi(authenticatedApi).checkFamilyOnboarding(),
-        ])
-        if (cancelled) return
-        setNeedsCreateFamily(familyStatus.needsCreateFamily)
-        setGate(resolveOnboardingGate({
-          isAdmin,
-          upstreamOnboardingCompleted,
-          needsCreateFamily: familyStatus.needsCreateFamily,
-        }))
-      } catch (err) {
-        logRpcFailure('Failed to check onboarding status:', err)
-        // If the check fails, skip onboarding to avoid blocking the user.
-        if (!cancelled) setGate('app')
-      }
-    }
-
-    check()
-    return () => { cancelled = true }
-  }, [authenticatedApi, isAdmin])
-
-  const handleFamilyCreated = () => {
-    setNeedsCreateFamily(false)
-    setManualCreateFamily(false)
-    setGate('app')
-  }
+  // Family Memory Book fork: see useOnboardingGate.ts for why this decides once and never
+  // re-derives -- fixes a real bug where an RPC reconnect (a routine event, not an edge case)
+  // could yank "Create your family" away from the user moments after it appeared.
+  const { gate, needsCreateFamily, manualCreateFamily, openCreateFamily, markComplete } =
+    useOnboardingGate(authenticatedApi)
 
   // Still checking onboarding status
   if (gate === null) {
@@ -199,7 +153,7 @@ function AuthenticatedShell({
   }
 
   if (gate === 'upstream-wizard') {
-    return <OnboardingWizard onComplete={() => setGate('app')} />
+    return <OnboardingWizard onComplete={markComplete} />
   }
 
   // Automatic (non-admin, no family) or manual (any user, e.g. an admin via UserMenu) -- the same
@@ -208,7 +162,7 @@ function AuthenticatedShell({
     return (
       <CreateFamilyScreen
         authenticatedApi={authenticatedApi}
-        onComplete={handleFamilyCreated}
+        onComplete={markComplete}
       />
     )
   }
@@ -220,7 +174,7 @@ function AuthenticatedShell({
   return (
     <FamilyOnboardingProvider
       needsCreateFamily={needsCreateFamily}
-      openCreateFamily={() => setManualCreateFamily(true)}
+      openCreateFamily={openCreateFamily}
     >
       <AccountSelectionModal />
       {fullscreen ? (
