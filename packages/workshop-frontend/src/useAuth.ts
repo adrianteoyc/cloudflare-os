@@ -2,42 +2,32 @@ import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { useAuthVendors } from './ServerConfigContext'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
-// Family Memory Book fork: see docs/UPSTREAM.md's "Create-family onboarding integration" note.
-// Ends the Clerk session itself, not just this deployment's local OS session -- disposing the
-// authenticatedApi stub below has no way to reach Clerk's own session cookie, which lives on
-// Clerk's frontend-API domain, not this app's. Loads packages/clerk-auth-gatekeeper's sign-out
-// page (served through the router at this same path, like the sign-in page) in a hidden iframe and
-// calls Clerk.signOut() there; Clerk JS talks to Clerk's domain regardless of which origin embeds
-// it, which is also what lets the existing sign-in page work from here. Fire-and-forget: logout
-// must feel instant locally regardless of how this resolves, and it degrades harmlessly on a
-// deployment that doesn't use the Clerk Gatekeeper (the router 404s, or clerk-auth-gatekeeper's own
-// "not configured" page loads and never posts a message -- either way the failsafe timeout below
-// just removes the iframe).
-function endClerkSession(): void {
-  const iframe = document.createElement('iframe')
-  iframe.src = '/gatekeeper/clerk/sign-out'
-  iframe.style.display = 'none'
-  iframe.setAttribute('aria-hidden', 'true')
-  document.body.appendChild(iframe)
+/** Family Memory Book fork: the Clerk auth Gatekeeper's vendor id (its GATEKEEPER_CLERK binding). */
+export const CLERK_VENDOR_ID = 'clerk'
 
-  let done = false
-  const cleanup = () => {
-    if (done) return
-    done = true
-    window.removeEventListener('message', onMessage)
-    iframe.remove()
-  }
-  function onMessage(event: MessageEvent) {
-    if (event.source !== iframe.contentWindow) return
-    if (event.data?.type === 'clerk-signed-out' || event.data?.type === 'clerk-sign-out-failed') {
-      cleanup()
-    }
-  }
-  window.addEventListener('message', onMessage)
-  setTimeout(cleanup, 5000)
+/**
+ * Family Memory Book fork: see docs/UPSTREAM.md's "Create-family onboarding gate" note.
+ *
+ * Ends the Clerk session itself, not just this deployment's local OS session -- disposing the
+ * authenticatedApi stub has no way to reach Clerk's own session cookie, which lives on Clerk's
+ * frontend-API domain, not this app's. logout() navigates the page to
+ * packages/clerk-auth-gatekeeper's sign-out page (served through the router like the sign-in
+ * page), which calls Clerk.signOut() and bounces back to `returnTo` -- the same shape as the
+ * Cloudflare Access logout in useAuth(). A hidden iframe was tried first and is blocked by
+ * index.html's `frame-src srcdoc:` CSP, which only admits the Gadget sandbox; the e2e sign-out
+ * test caught it.
+ */
+export function clerkSignOutUrl(returnTo = '/'): string {
+  return `/gatekeeper/clerk/sign-out?return_to=${encodeURIComponent(returnTo)}`
+}
+
+export interface UseAuthOptions {
+  /** Full-page navigation; injectable so tests can observe it (jsdom cannot navigate). */
+  navigate?: (url: string) => void
 }
 
 interface AuthState {
@@ -49,7 +39,12 @@ interface AuthState {
 
 export { CF_ACCESS_MODE }
 
-export function useAuth(publicApi: RpcStub<PublicApi>) {
+export function useAuth(publicApi: RpcStub<PublicApi>, options: UseAuthOptions = {}) {
+  const navigate = options.navigate ?? ((url: string) => window.location.assign(url))
+  // Family Memory Book fork: whether Clerk is a configured sign-in vendor (see logout()).
+  // Empty outside a ServerConfigContext provider or before the config loads, which just means a
+  // plain local logout -- the same as every other vendor.
+  const clerkConfigured = useAuthVendors().some((vendor) => vendor.vendorId === CLERK_VENDOR_ID)
   const [authState, setAuthState] = useState<AuthState>({
     token: null,
     authenticatedApi: null,
@@ -179,7 +174,13 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     })
 
     localStorage.removeItem('authToken')
-    endClerkSession()
+
+    // Family Memory Book fork: local state is already cleared above, so wherever this navigation
+    // ends up the user is signed out of the app; what it adds is ending Clerk's own session, so the
+    // next "Continue with Clerk" shows the account chooser instead of silently reusing it.
+    if (clerkConfigured) {
+      navigate(clerkSignOutUrl('/'))
+    }
   }
 
   return {

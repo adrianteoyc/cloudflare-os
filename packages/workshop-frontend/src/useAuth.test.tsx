@@ -5,9 +5,10 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { PublicApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import type { PublicApi, AiChatAuthorInfo, ServerConfig } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
-import { useAuth } from './useAuth'
+import { ServerConfigContext } from './ServerConfigContext'
+import { useAuth, type UseAuthOptions } from './useAuth'
 
 vi.mock('./errorReporting', () => ({
   setReportedUserId: vi.fn<(reportedUserId: string | undefined) => void>(),
@@ -77,10 +78,11 @@ describe('useAuth error reporting identity', () => {
   async function mount(
     publicApi: RpcStub<PublicApi>,
     hook: typeof useAuth = useAuth,
+    options: UseAuthOptions & { serverConfig?: ServerConfig } = {},
   ): Promise<{ controls: Controls; root: Root }> {
     const captured: { controls?: Controls } = {}
     function Consumer() {
-      const { login, logout } = hook(publicApi)
+      const { login, logout } = hook(publicApi, { navigate: options.navigate })
       captured.controls = { login, logout }
       return null
     }
@@ -90,7 +92,11 @@ describe('useAuth error reporting identity', () => {
     containers.push(container)
     const root = createRoot(container)
     roots.push(root)
-    await act(async () => root.render(<Consumer />))
+    await act(async () => root.render(
+      <ServerConfigContext.Provider value={options.serverConfig ?? null}>
+        <Consumer />
+      </ServerConfigContext.Provider>,
+    ))
     return { controls: captured.controls!, root }
   }
 
@@ -195,70 +201,42 @@ describe('useAuth error reporting identity', () => {
 
   // Family Memory Book fork: logout() must end the Clerk session itself, not just this app's local
   // one, or the next "Continue with Clerk" silently reuses the old session instead of showing
-  // Clerk's account chooser. See useAuth.ts's endClerkSession() doc comment.
+  // Clerk's account chooser. See useAuth.ts's clerkSignOutUrl().
   describe('ending the Clerk session on logout', () => {
-    afterEach(() => {
-      document.querySelectorAll('iframe').forEach((el) => el.remove())
-    })
+    const clerkConfig = { authVendors: [{ vendorId: 'clerk', displayName: 'Clerk' }] } as unknown as ServerConfig
+    const otherConfig = { authVendors: [{ vendorId: 'github', displayName: 'GitHub' }] } as unknown as ServerConfig
 
-    it('opens a hidden iframe at the sign-out page', async () => {
+    it('navigates to the sign-out page, returning to the root, when Clerk is a configured vendor', async () => {
       localStorage.setItem('authToken', 'stored-token')
-      const { controls } = await mount(stubPublicApi(person))
+      const navigate = vi.fn<(url: string) => void>()
+      const { controls } = await mount(stubPublicApi(person), useAuth, { serverConfig: clerkConfig, navigate })
 
       act(() => controls.logout())
 
-      const iframe = document.querySelector('iframe')
-      expect(iframe).not.toBeNull()
-      expect(iframe!.src).toContain('/gatekeeper/clerk/sign-out')
-      expect(iframe!.style.display).toBe('none')
+      expect(navigate).toHaveBeenCalledExactlyOnceWith('/gatekeeper/clerk/sign-out?return_to=%2F')
+      // Local logout still happened first: the token is gone before the page leaves.
+      expect(localStorage.getItem('authToken')).toBeNull()
     })
 
-    it('removes the iframe once it reports the Clerk session ended', async () => {
+    it('does not navigate when Clerk is not among the configured vendors', async () => {
       localStorage.setItem('authToken', 'stored-token')
-      const { controls } = await mount(stubPublicApi(person))
+      const navigate = vi.fn<(url: string) => void>()
+      const { controls } = await mount(stubPublicApi(person), useAuth, { serverConfig: otherConfig, navigate })
+
       act(() => controls.logout())
-      const iframe = document.querySelector('iframe')!
 
-      act(() => {
-        window.dispatchEvent(new MessageEvent('message', {
-          source: iframe.contentWindow,
-          data: { type: 'clerk-signed-out' },
-        }))
-      })
-
-      expect(document.querySelector('iframe')).toBeNull()
+      expect(navigate).not.toHaveBeenCalled()
+      expect(localStorage.getItem('authToken')).toBeNull()
     })
 
-    it('also removes the iframe when Clerk sign-out fails, rather than leaking it', async () => {
+    it('does not navigate when no deployment config is available at all', async () => {
       localStorage.setItem('authToken', 'stored-token')
-      const { controls } = await mount(stubPublicApi(person))
+      const navigate = vi.fn<(url: string) => void>()
+      const { controls } = await mount(stubPublicApi(person), useAuth, { navigate })
+
       act(() => controls.logout())
-      const iframe = document.querySelector('iframe')!
 
-      act(() => {
-        window.dispatchEvent(new MessageEvent('message', {
-          source: iframe.contentWindow,
-          data: { type: 'clerk-sign-out-failed' },
-        }))
-      })
-
-      expect(document.querySelector('iframe')).toBeNull()
-    })
-
-    it('ignores a message from a different source (not the sign-out iframe)', async () => {
-      localStorage.setItem('authToken', 'stored-token')
-      const { controls } = await mount(stubPublicApi(person))
-      act(() => controls.logout())
-      expect(document.querySelector('iframe')).not.toBeNull()
-
-      act(() => {
-        window.dispatchEvent(new MessageEvent('message', {
-          source: window,
-          data: { type: 'clerk-signed-out' },
-        }))
-      })
-
-      expect(document.querySelector('iframe')).not.toBeNull()
+      expect(navigate).not.toHaveBeenCalled()
     })
   })
 })
