@@ -16,12 +16,25 @@ import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useOnboardingGate, type OnboardingGateState } from './useOnboardingGate'
 
+// No real waiting for retry backoff in these tests -- see GateProbe's retryDelaysMs prop.
+const NO_DELAY = [0, 0];
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((next) => { resolve = next })
   return { promise, resolve }
+}
+
+/** Rejects `failures` times, then resolves with `result` on every call after that. */
+function flaky(failures: number, result: { needsCreateFamily: boolean }) {
+  let call = 0
+  return vi.fn<() => Promise<{ needsCreateFamily: boolean }>>(() => {
+    call++
+    if (call <= failures) return Promise.reject(new Error(`transient failure #${call}`))
+    return Promise.resolve(result)
+  })
 }
 
 interface MockApiOverrides {
@@ -41,8 +54,14 @@ function mockApi(overrides: MockApiOverrides = {}): RpcStub<AuthenticatedApi> {
 
 let latestState: OnboardingGateState | null = null
 
-function GateProbe({ authenticatedApi }: { authenticatedApi: RpcStub<AuthenticatedApi> }) {
-  latestState = useOnboardingGate(authenticatedApi)
+function GateProbe({
+  authenticatedApi,
+  retryDelaysMs = NO_DELAY,
+}: {
+  authenticatedApi: RpcStub<AuthenticatedApi>
+  retryDelaysMs?: readonly number[]
+}) {
+  latestState = useOnboardingGate(authenticatedApi, retryDelaysMs)
   return null
 }
 
@@ -68,11 +87,18 @@ function rerenderWith(authenticatedApi: RpcStub<AuthenticatedApi>) {
   act(() => { root!.render(<GateProbe authenticatedApi={authenticatedApi} />) })
 }
 
-async function flush() {
-  await act(async () => {
-    await Promise.resolve()
-    await Promise.resolve()
-  })
+/**
+ * Yields to real macrotasks, not just microtasks: retryDelaysMs uses a genuine `setTimeout` even
+ * at 0ms (NO_DELAY above), so a plain `await Promise.resolve()` chain would never let a queued
+ * retry fire. Each round trip is one real tick; `times` covers however many attempt -> backoff ->
+ * next-attempt hops a test needs to settle (a fully-exhausted 3-attempt sequence needs at least 2).
+ */
+async function flush(times = 4) {
+  for (let i = 0; i < times; i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+  }
 }
 
 describe('useOnboardingGate', () => {
@@ -159,5 +185,74 @@ describe('useOnboardingGate', () => {
 
     expect(latestState?.gate).toBe('app')
     expect(latestState?.manualCreateFamily).toBe(true)
+  })
+
+  describe('retrying transient failures instead of failing open', () => {
+    it('retries a transient failure and succeeds on the second attempt', async () => {
+      const checkFamilyOnboarding = flaky(1, { needsCreateFamily: true })
+      mount(mockApi({ checkFamilyOnboarding }))
+
+      await flush()
+
+      expect(latestState?.gate).toBe('create-family')
+      expect(checkFamilyOnboarding).toHaveBeenCalledTimes(2)
+    })
+
+    it('retries twice more after an initial failure and still succeeds on the third attempt', async () => {
+      const checkFamilyOnboarding = flaky(2, { needsCreateFamily: false })
+      mount(mockApi({ checkFamilyOnboarding }))
+
+      await flush()
+
+      expect(latestState?.gate).toBe('app')
+      expect(checkFamilyOnboarding).toHaveBeenCalledTimes(3)
+    })
+
+    it('gives up after 3 failed attempts and shows an error state -- never fails open to app', async () => {
+      const checkFamilyOnboarding = vi.fn<() => Promise<{ needsCreateFamily: boolean }>>(
+        () => Promise.reject(new Error('still broken')),
+      )
+      mount(mockApi({ checkFamilyOnboarding }))
+
+      await flush()
+
+      expect(latestState?.gate).toBe('error')
+      expect(latestState?.gate).not.toBe('app')
+      expect(checkFamilyOnboarding).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not keep retrying forever -- stops issuing calls once in the error state', async () => {
+      const checkFamilyOnboarding = vi.fn<() => Promise<{ needsCreateFamily: boolean }>>(
+        () => Promise.reject(new Error('still broken')),
+      )
+      mount(mockApi({ checkFamilyOnboarding }))
+      await flush()
+      expect(latestState?.gate).toBe('error')
+      const callsAtError = checkFamilyOnboarding.mock.calls.length
+
+      await flush()
+
+      expect(checkFamilyOnboarding).toHaveBeenCalledTimes(callsAtError)
+    })
+
+    it('retry() from the error state starts a fresh 3-attempt sequence and can succeed', async () => {
+      const checkFamilyOnboarding = vi.fn<() => Promise<{ needsCreateFamily: boolean }>>(
+        () => Promise.reject(new Error('still broken')),
+      )
+      mount(mockApi({ checkFamilyOnboarding }))
+      await flush()
+      expect(latestState?.gate).toBe('error')
+      expect(checkFamilyOnboarding).toHaveBeenCalledTimes(3)
+
+      // Whatever was wrong has resolved by the time the user clicks "Try again".
+      checkFamilyOnboarding.mockImplementation(() => Promise.resolve({ needsCreateFamily: true }))
+      act(() => { latestState!.retry() })
+      expect(latestState?.gate).toBeNull()
+
+      await flush()
+
+      expect(latestState?.gate).toBe('create-family')
+      expect(checkFamilyOnboarding).toHaveBeenCalledTimes(4)
+    })
   })
 })

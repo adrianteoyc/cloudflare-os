@@ -140,14 +140,31 @@ function AuthenticatedShell({
   // Family Memory Book fork: see useOnboardingGate.ts for why this decides once and never
   // re-derives -- fixes a real bug where an RPC reconnect (a routine event, not an edge case)
   // could yank "Create your family" away from the user moments after it appeared.
-  const { gate, needsCreateFamily, manualCreateFamily, openCreateFamily, markComplete } =
+  const { gate, needsCreateFamily, manualCreateFamily, openCreateFamily, markComplete, retry } =
     useOnboardingGate(authenticatedApi)
 
-  // Still checking onboarding status
+  // Still checking onboarding status (including between retries)
   if (gate === null) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  // The onboarding check failed 3 times in a row -- never fails open to 'app' here (see
+  // useOnboardingGate.ts), so a family-less user always gets a way back in rather than silently
+  // losing "Create your family".
+  if (gate === 'error') {
+    return (
+      <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base p-6">
+        <p className="text-sm text-kumo-danger">Couldn&apos;t check your account status.</p>
+        <button
+          onClick={retry}
+          className="px-4 py-2 text-sm font-medium text-kumo-inverse bg-kumo-brand rounded-lg hover:bg-kumo-brand-hover transition-colors"
+        >
+          Try again
+        </button>
       </div>
     )
   }
