@@ -5,6 +5,41 @@ import { setReportedUserId } from './errorReporting'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
+// Family Memory Book fork: see docs/UPSTREAM.md's "Create-family onboarding integration" note.
+// Ends the Clerk session itself, not just this deployment's local OS session -- disposing the
+// authenticatedApi stub below has no way to reach Clerk's own session cookie, which lives on
+// Clerk's frontend-API domain, not this app's. Loads packages/clerk-auth-gatekeeper's sign-out
+// page (served through the router at this same path, like the sign-in page) in a hidden iframe and
+// calls Clerk.signOut() there; Clerk JS talks to Clerk's domain regardless of which origin embeds
+// it, which is also what lets the existing sign-in page work from here. Fire-and-forget: logout
+// must feel instant locally regardless of how this resolves, and it degrades harmlessly on a
+// deployment that doesn't use the Clerk Gatekeeper (the router 404s, or clerk-auth-gatekeeper's own
+// "not configured" page loads and never posts a message -- either way the failsafe timeout below
+// just removes the iframe).
+function endClerkSession(): void {
+  const iframe = document.createElement('iframe')
+  iframe.src = '/gatekeeper/clerk/sign-out'
+  iframe.style.display = 'none'
+  iframe.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(iframe)
+
+  let done = false
+  const cleanup = () => {
+    if (done) return
+    done = true
+    window.removeEventListener('message', onMessage)
+    iframe.remove()
+  }
+  function onMessage(event: MessageEvent) {
+    if (event.source !== iframe.contentWindow) return
+    if (event.data?.type === 'clerk-signed-out' || event.data?.type === 'clerk-sign-out-failed') {
+      cleanup()
+    }
+  }
+  window.addEventListener('message', onMessage)
+  setTimeout(cleanup, 5000)
+}
+
 interface AuthState {
   token: string | null
   authenticatedApi: RpcStub<AuthenticatedApi> | null
@@ -144,6 +179,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     })
 
     localStorage.removeItem('authToken')
+    endClerkSession()
   }
 
   return {

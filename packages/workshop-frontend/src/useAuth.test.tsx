@@ -192,4 +192,73 @@ describe('useAuth error reporting identity', () => {
 
     expect(setReportedUserId).not.toHaveBeenCalled()
   })
+
+  // Family Memory Book fork: logout() must end the Clerk session itself, not just this app's local
+  // one, or the next "Continue with Clerk" silently reuses the old session instead of showing
+  // Clerk's account chooser. See useAuth.ts's endClerkSession() doc comment.
+  describe('ending the Clerk session on logout', () => {
+    afterEach(() => {
+      document.querySelectorAll('iframe').forEach((el) => el.remove())
+    })
+
+    it('opens a hidden iframe at the sign-out page', async () => {
+      localStorage.setItem('authToken', 'stored-token')
+      const { controls } = await mount(stubPublicApi(person))
+
+      act(() => controls.logout())
+
+      const iframe = document.querySelector('iframe')
+      expect(iframe).not.toBeNull()
+      expect(iframe!.src).toContain('/gatekeeper/clerk/sign-out')
+      expect(iframe!.style.display).toBe('none')
+    })
+
+    it('removes the iframe once it reports the Clerk session ended', async () => {
+      localStorage.setItem('authToken', 'stored-token')
+      const { controls } = await mount(stubPublicApi(person))
+      act(() => controls.logout())
+      const iframe = document.querySelector('iframe')!
+
+      act(() => {
+        window.dispatchEvent(new MessageEvent('message', {
+          source: iframe.contentWindow,
+          data: { type: 'clerk-signed-out' },
+        }))
+      })
+
+      expect(document.querySelector('iframe')).toBeNull()
+    })
+
+    it('also removes the iframe when Clerk sign-out fails, rather than leaking it', async () => {
+      localStorage.setItem('authToken', 'stored-token')
+      const { controls } = await mount(stubPublicApi(person))
+      act(() => controls.logout())
+      const iframe = document.querySelector('iframe')!
+
+      act(() => {
+        window.dispatchEvent(new MessageEvent('message', {
+          source: iframe.contentWindow,
+          data: { type: 'clerk-sign-out-failed' },
+        }))
+      })
+
+      expect(document.querySelector('iframe')).toBeNull()
+    })
+
+    it('ignores a message from a different source (not the sign-out iframe)', async () => {
+      localStorage.setItem('authToken', 'stored-token')
+      const { controls } = await mount(stubPublicApi(person))
+      act(() => controls.logout())
+      expect(document.querySelector('iframe')).not.toBeNull()
+
+      act(() => {
+        window.dispatchEvent(new MessageEvent('message', {
+          source: window,
+          data: { type: 'clerk-signed-out' },
+        }))
+      })
+
+      expect(document.querySelector('iframe')).not.toBeNull()
+    })
+  })
 })
