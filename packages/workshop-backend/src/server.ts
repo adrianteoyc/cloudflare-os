@@ -13,7 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -22,6 +22,7 @@ import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CL
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import type { WorkerEntrypoint } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -61,6 +62,29 @@ export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
 // Re-export service-binding entrypoint for external channel integrations.
 export { ExternalMessageGateway };
 
+/**
+ * Family Memory Book fork: FamilyGatekeeperService's RPC surface (packages/family-gatekeeper),
+ * bound as GATEKEEPER_FAMILY -- see docs/UPSTREAM.md's "Create-family onboarding integration"
+ * note. A minimal local interface, not the real package's types: workshop-backend's own pnpm
+ * workspace has no dependency on packages/family-gatekeeper (it lives in a separate workspace, the
+ * parent repo's), so this only declares the two methods actually called here. `extends
+ * WorkerEntrypoint` is what makes this a valid `Service<T>` binding type -- see GatekeeperVendor/
+ * GatekeeperUser in @gadgets/workshop-shared/gatekeeper.ts for the same pattern.
+ */
+interface FamilyGatekeeperServiceApi extends WorkerEntrypoint {
+  needsCreateFamily(userId: string): Promise<boolean>;
+  createFamily(userId: string, familyName: string): Promise<{ familyId: string }>;
+}
+
+/**
+ * Family Memory Book fork: clerk-auth-gatekeeper's GatekeeperUserImpl, widened with the one method
+ * (getClerkUserId()) it has beyond the shared GatekeeperUser interface. See
+ * packages/clerk-auth-gatekeeper/src/clerk.ts.
+ */
+interface ClerkGatekeeperUser extends GatekeeperUser {
+  getClerkUserId(): Promise<string | null>;
+}
+
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
   // Set these if using Cloudflare Access for authentication, otherwise username/password is used.
@@ -68,6 +92,9 @@ type Env = Cloudflare.Env & {
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
   DEV?: boolean;
   FLAGS?: Flagship;
+  GATEKEEPER_FAMILY?: Service<FamilyGatekeeperServiceApi>;
+  /** Family Memory Book fork: applied to a user's preferredModel when they skip onboarding. */
+  DEFAULT_MODEL?: string;
 }
 
 // =======================================================================================
@@ -155,6 +182,82 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   completeOnboarding(): Promise<void> {
     return this.#user.completeOnboarding();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Family Memory Book fork: create-family onboarding. Not part of upstream's AuthenticatedApi
+  // interface -- the frontend fork casts its RpcStub to reach these. See docs/UPSTREAM.md's
+  // "Create-family onboarding integration" note for the full picture, including why this bridges
+  // through getClerkGatekeeperAccount() rather than using this.#userId (email, not a Clerk id).
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * This session's Clerk user id (the JWT `sub` Clerk Organizations and the Family Gatekeeper key
+   * on), bridged from the OS's own email-keyed identity via the connected "clerk" vendor account.
+   * Null if this user didn't sign in via Clerk (e.g. Access mode, or the vendor wasn't bound as
+   * GATEKEEPER_CLERK) or hasn't finished that sign-in.
+   */
+  async #clerkUserId(): Promise<string | null> {
+    let account = await this.#user.getClerkGatekeeperAccount();
+    if (!account) return null;
+    let clerkAccount = account as unknown as Fetcher<ClerkGatekeeperUser>;
+    return clerkAccount.getClerkUserId();
+  }
+
+  /**
+   * Applies DEFAULT_MODEL to this user's preferredModel if one is configured and none is set yet.
+   * Called whenever a user is about to skip onboarding (either upstream's wizard, ours, or both) --
+   * skipping the wizard is what would otherwise leave preferredModel permanently null, since
+   * OnboardingWizard.tsx is the only other place that sets it. Never throws: a misconfigured
+   * DEFAULT_MODEL should not strand a user who otherwise has everything they need.
+   */
+  async #ensureDefaultModelSet(): Promise<void> {
+    if (!this.env.DEFAULT_MODEL) return;
+    try {
+      let current = await this.#user.getPreferredModel();
+      if (!current) {
+        await this.#user.setPreferredModel(this.env.DEFAULT_MODEL);
+      }
+    } catch (error) {
+      logger.warn("failed to apply platform default model", { event: "family.default_model_failed", error });
+    }
+  }
+
+  /**
+   * The create-family onboarding gate's status check. Admins always get `needsCreateFamily: false`
+   * -- they keep upstream's own onboarding untouched, never routed through this at all. A non-admin
+   * with no family gets `true` (show "Create your family"); one who already has a family gets
+   * `false` (skip both our screen and upstream's OnboardingWizard), and that's also that "about to
+   * skip onboarding" moment #ensureDefaultModelSet() exists for.
+   */
+  async checkFamilyOnboarding(): Promise<{ needsCreateFamily: boolean }> {
+    if (this.#isAdmin() || !this.env.GATEKEEPER_FAMILY) {
+      return { needsCreateFamily: false };
+    }
+    let clerkUserId = await this.#clerkUserId();
+    if (!clerkUserId) {
+      // Fail open, same as the frontend's own catch around this call: better to show the app than
+      // block someone who isn't signed in via Clerk for a reason this method can't distinguish.
+      return { needsCreateFamily: false };
+    }
+    let needsCreateFamily = await this.env.GATEKEEPER_FAMILY.needsCreateFamily(clerkUserId);
+    if (!needsCreateFamily) {
+      await this.#ensureDefaultModelSet();
+    }
+    return { needsCreateFamily };
+  }
+
+  /** Creates the signed-in user's family. See packages/family-gatekeeper's createFamily(). */
+  async createFamily(familyName: string): Promise<void> {
+    if (!this.env.GATEKEEPER_FAMILY) {
+      throw new Error("The Family Gatekeeper is not configured on this deployment.");
+    }
+    let clerkUserId = await this.#clerkUserId();
+    if (!clerkUserId) {
+      throw new Error("Sign in with Clerk before creating a family.");
+    }
+    await this.env.GATEKEEPER_FAMILY.createFamily(clerkUserId, familyName);
+    await this.#ensureDefaultModelSet();
   }
 
   getCloudflareUsage(): Promise<CloudflareUsageInfo> {

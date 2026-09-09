@@ -7,12 +7,16 @@ import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useRpcStub, useConnectionLost } from '../RpcContext'
 import { markConnectionRestored } from '../main'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
-import { AuthProvider } from '../AuthContext'
+import { AuthProvider, useAuthenticatedApi } from '../AuthContext'
 import { FeatureFlagsProvider } from '../FeatureFlagsContext'
 import Header from '../components/Header'
 import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
+// Family Memory Book fork: see docs/UPSTREAM.md's "Create-family onboarding integration" note.
+import CreateFamilyScreen from '../CreateFamilyScreen'
+import { asFamilyOnboardingApi } from '../familyOnboardingApi'
+import { resolveOnboardingGate, OnboardingGateDecision } from '../onboardingGate'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 
 export const Route = createRootRoute({
@@ -124,9 +128,9 @@ function RootComponent() {
 }
 
 /**
- * Inner shell that checks onboarding status and either shows the wizard
- * or the normal app chrome. Lives inside AuthProvider so the wizard can
- * use useAuthenticatedApi().
+ * Inner shell that checks onboarding status and either shows upstream's wizard, the Family Memory
+ * Book "Create your family" screen, or the normal app chrome. Lives inside AuthProvider so both
+ * screens can use useAuthenticatedApi().
  */
 function AuthenticatedShell({
   authenticatedApi,
@@ -135,23 +139,43 @@ function AuthenticatedShell({
   authenticatedApi: RpcStub<AuthenticatedApi>
   isWorkspaceEditor: boolean
 }) {
-  // null = still checking, true = needs onboarding, false = onboarding done
-  const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
+  const { isAdmin } = useAuthenticatedApi()
+  // null = still checking
+  const [gate, setGate] = useState<OnboardingGateDecision | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    authenticatedApi.isOnboardingCompleted().then((completed) => {
-      if (!cancelled) setOnboardingNeeded(!completed)
-    }).catch((err) => {
-      logRpcFailure('Failed to check onboarding status:', err)
-      // If the check fails, skip onboarding to avoid blocking the user
-      if (!cancelled) setOnboardingNeeded(false)
-    })
+
+    async function check() {
+      try {
+        // Family Memory Book fork: checkFamilyOnboarding() is not part of upstream's
+        // AuthenticatedApi -- see docs/UPSTREAM.md's "Create-family onboarding integration" note.
+        // Always fetched alongside isOnboardingCompleted(), even for an admin (who
+        // checkFamilyOnboarding() short-circuits server-side): simpler than threading isAdmin's
+        // own async load state through this effect to conditionally skip it.
+        const [upstreamOnboardingCompleted, familyStatus] = await Promise.all([
+          authenticatedApi.isOnboardingCompleted(),
+          asFamilyOnboardingApi(authenticatedApi).checkFamilyOnboarding(),
+        ])
+        if (cancelled) return
+        setGate(resolveOnboardingGate({
+          isAdmin,
+          upstreamOnboardingCompleted,
+          needsCreateFamily: familyStatus.needsCreateFamily,
+        }))
+      } catch (err) {
+        logRpcFailure('Failed to check onboarding status:', err)
+        // If the check fails, skip onboarding to avoid blocking the user.
+        if (!cancelled) setGate('app')
+      }
+    }
+
+    check()
     return () => { cancelled = true }
-  }, [authenticatedApi])
+  }, [authenticatedApi, isAdmin])
 
   // Still checking onboarding status
-  if (onboardingNeeded === null) {
+  if (gate === null) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
@@ -159,9 +183,17 @@ function AuthenticatedShell({
     )
   }
 
-  // Show onboarding wizard
-  if (onboardingNeeded) {
-    return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
+  if (gate === 'upstream-wizard') {
+    return <OnboardingWizard onComplete={() => setGate('app')} />
+  }
+
+  if (gate === 'create-family') {
+    return (
+      <CreateFamilyScreen
+        authenticatedApi={authenticatedApi}
+        onComplete={() => setGate('app')}
+      />
+    )
   }
 
   // Normal app shell. The workspace editor is rendered fullscreen (no chrome); everything else

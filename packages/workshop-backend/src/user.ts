@@ -66,6 +66,14 @@ function areCredentialsValid(record: ConnectedAccountRecord): boolean {
  */
 export const CLOUDFLARE_VENDOR_ID = "cloudflare";
 
+/**
+ * Family Memory Book fork: vendor id of the Clerk auth Gatekeeper (packages/clerk-auth-gatekeeper,
+ * the suffix of GATEKEEPER_CLERK, lowercased). Used to find the connected account whose Clerk user
+ * id bridges this OS session to the Family Gatekeeper -- see getClerkGatekeeperAccount() and
+ * docs/UPSTREAM.md's "Create-family onboarding integration" note.
+ */
+export const CLERK_VENDOR_ID = "clerk";
+
 export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
   config: AiModelConfig;
@@ -624,6 +632,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
       if (rec && rec.vendorId === CLOUDFLARE_VENDOR_ID) {
         return rec.account as unknown as Fetcher<CloudflareGatekeeperUser>;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Family Memory Book fork: the connected Clerk gatekeeper account stub, if any -- mirrors
+   * getCloudflareGatekeeperAccount() above. Bridges this OS session's identity (keyed by
+   * uniqueName/email) to the signed-in user's Clerk id, which Clerk Organizations and the Family
+   * Gatekeeper require (they know nothing about OS usernames). Null if this user didn't sign in
+   * via the "clerk" auth Gatekeeper.
+   */
+  async getClerkGatekeeperAccount(): Promise<Fetcher<GatekeeperUser> | null> {
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let rec: ConnectedAccountRecord | undefined;
+      try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
+      if (rec && rec.vendorId === CLERK_VENDOR_ID) {
+        return rec.account;
       }
     }
     return null;
