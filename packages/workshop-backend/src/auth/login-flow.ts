@@ -22,7 +22,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
-import { CLOUDFLARE_VENDOR_ID } from "../user.js";
+import { CLOUDFLARE_VENDOR_ID, CLERK_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
 
 const logger = createWorkshopLogger("workshop.auth");
@@ -123,7 +123,15 @@ export class LoginConnectCallbackImpl
       // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
       // requested full (non-transient) scopes, so persist the grant as a connected account before
       // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
-      if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
+      //
+      // Family Memory Book fork: Clerk is persisted too. It's the bridge from this OS user (keyed
+      // by email) to the Clerk user id that Clerk Organizations and the Family Gatekeeper key on --
+      // AuthenticatedApiImpl.checkFamilyOnboarding()/createFamily() read it back through
+      // UserDurableObject.getClerkGatekeeperAccount(). Without this, a Clerk sign-in left no record
+      // at all and every family check silently found "no Clerk account" (found via the e2e harness,
+      // docs/family-book-setup.md). clerk-auth-gatekeeper's grant is not transient: its UserAccount
+      // DO keeps the verified identity until revoke(), which a repeated sign-in triggers below.
+      if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID || this.ctx.props.vendorId === CLERK_VENDOR_ID) {
         await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
       }
       // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of

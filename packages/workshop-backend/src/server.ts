@@ -64,7 +64,7 @@ export { ExternalMessageGateway };
 
 /**
  * Family Memory Book fork: FamilyGatekeeperService's RPC surface (packages/family-gatekeeper),
- * bound as GATEKEEPER_FAMILY -- see docs/UPSTREAM.md's "Create-family onboarding integration"
+ * bound as FAMILY_SERVICE -- see docs/UPSTREAM.md's "Create-family onboarding integration"
  * note. A minimal local interface, not the real package's types: workshop-backend's own pnpm
  * workspace has no dependency on packages/family-gatekeeper (it lives in a separate workspace, the
  * parent repo's), so this only declares the two methods actually called here. `extends
@@ -92,7 +92,13 @@ type Env = Cloudflare.Env & {
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
   DEV?: boolean;
   FLAGS?: Flagship;
-  GATEKEEPER_FAMILY?: Service<FamilyGatekeeperServiceApi>;
+  // NOT named GATEKEEPER_*: the Workshop treats every GATEKEEPER_<NAME> binding as a Gatekeeper
+  // *vendor* (auth/auth-vendors.ts) and calls describe()/getSupportedResources() on it at every
+  // session load. FamilyGatekeeperService is a plain RPC service with neither, which showed up
+  // in production as "The RPC receiver does not implement the method \"describe\"" on our side and
+  // as hung, runtime-cancelled requests on the family-gatekeeper's. The router's own
+  // GATEKEEPER_FAMILY binding is unaffected -- it only uses the prefix to route HTTP paths.
+  FAMILY_SERVICE?: Service<FamilyGatekeeperServiceApi>;
   /** Family Memory Book fork: applied to a user's preferredModel when they skip onboarding. */
   DEFAULT_MODEL?: string;
 }
@@ -234,16 +240,20 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
    * #ensureDefaultModelSet() exists for.
    */
   async checkFamilyOnboarding(): Promise<{ needsCreateFamily: boolean }> {
-    if (!this.env.GATEKEEPER_FAMILY) {
+    if (!this.env.FAMILY_SERVICE) {
+      // A deployment without the Family Gatekeeper has no family concept: nothing to onboard into.
       return { needsCreateFamily: false };
     }
     let clerkUserId = await this.#clerkUserId();
     if (!clerkUserId) {
-      // Fail open, same as the frontend's own catch around this call: better to show the app than
-      // block someone who isn't signed in via Clerk for a reason this method can't distinguish.
-      return { needsCreateFamily: false };
+      // Not fail-open. On a deployment that has the Family Gatekeeper, every user signs in via
+      // Clerk, so no linked Clerk account is a broken session, not a legitimate "no family needed".
+      // Returning false here is exactly the silent-drop-into-the-app bug the e2e harness caught
+      // (the login flow wasn't persisting the Clerk grant); an error instead reaches the
+      // frontend's retry + "Try again" state, where it is visible and recoverable.
+      throw new Error("This session has no linked Clerk account, so family membership cannot be checked.");
     }
-    let needsCreateFamily = await this.env.GATEKEEPER_FAMILY.needsCreateFamily(clerkUserId);
+    let needsCreateFamily = await this.env.FAMILY_SERVICE.needsCreateFamily(clerkUserId);
     if (!needsCreateFamily) {
       await this.#ensureDefaultModelSet();
     }
@@ -252,14 +262,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   /** Creates the signed-in user's family. See packages/family-gatekeeper's createFamily(). */
   async createFamily(familyName: string): Promise<void> {
-    if (!this.env.GATEKEEPER_FAMILY) {
+    if (!this.env.FAMILY_SERVICE) {
       throw new Error("The Family Gatekeeper is not configured on this deployment.");
     }
     let clerkUserId = await this.#clerkUserId();
     if (!clerkUserId) {
       throw new Error("Sign in with Clerk before creating a family.");
     }
-    await this.env.GATEKEEPER_FAMILY.createFamily(clerkUserId, familyName);
+    await this.env.FAMILY_SERVICE.createFamily(clerkUserId, familyName);
     await this.#ensureDefaultModelSet();
   }
 
