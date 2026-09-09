@@ -224,14 +224,17 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   /**
-   * The create-family onboarding gate's status check. Admins always get `needsCreateFamily: false`
-   * -- they keep upstream's own onboarding untouched, never routed through this at all. A non-admin
-   * with no family gets `true` (show "Create your family"); one who already has a family gets
-   * `false` (skip both our screen and upstream's OnboardingWizard), and that's also that "about to
-   * skip onboarding" moment #ensureDefaultModelSet() exists for.
+   * The create-family onboarding status check -- truthful for every user, admins included.
+   * Whether an admin is *routed* through the create-family screen automatically is the frontend
+   * gate's call (resolveOnboardingGate: admins always keep upstream's own onboarding untouched,
+   * never auto-routed here); this method only reports whether the user has a family, so an admin
+   * with none can still be offered a manual "Create your family" entry point elsewhere in the UI.
+   * A non-admin with no family gets `true` (show "Create your family" automatically); anyone who
+   * already has a family gets `false`, which is also the "about to skip onboarding" moment
+   * #ensureDefaultModelSet() exists for.
    */
   async checkFamilyOnboarding(): Promise<{ needsCreateFamily: boolean }> {
-    if (this.#isAdmin() || !this.env.GATEKEEPER_FAMILY) {
+    if (!this.env.GATEKEEPER_FAMILY) {
       return { needsCreateFamily: false };
     }
     let clerkUserId = await this.#clerkUserId();

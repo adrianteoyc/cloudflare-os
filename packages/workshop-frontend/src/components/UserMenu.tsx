@@ -2,10 +2,14 @@ import { useNavigate } from '@tanstack/react-router'
 import { DropdownMenu } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useAvatar } from '../useAvatar'
+import { useFamilyOnboarding } from '../FamilyOnboardingContext'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './menuStyles'
 
 export default function UserMenu() {
   const { authenticatedApi, logout, currentUser, isAdmin } = useAuthenticatedApi()
+  // Family Memory Book fork: null outside a FamilyOnboardingProvider, which shouldn't happen here
+  // (UserMenu only ever renders inside the app shell) but is handled rather than assumed away.
+  const familyOnboarding = useFamilyOnboarding()
   const navigate = useNavigate()
 
   const avatarUrl = useAvatar(authenticatedApi, currentUser?.id)
@@ -44,6 +48,14 @@ export default function UserMenu() {
         >
           Providers
         </DropdownMenu.Item>
+        {familyOnboarding?.needsCreateFamily && (
+          <DropdownMenu.Item
+            onClick={familyOnboarding.openCreateFamily}
+            className={MENU_ITEM}
+          >
+            Create your family
+          </DropdownMenu.Item>
+        )}
         {isAdmin && (
           <DropdownMenu.Item
             onClick={() => navigate({ to: '/admin' })}

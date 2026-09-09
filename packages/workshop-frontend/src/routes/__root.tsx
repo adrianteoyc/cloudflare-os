@@ -17,6 +17,7 @@ import OnboardingWizard from '../OnboardingWizard'
 import CreateFamilyScreen from '../CreateFamilyScreen'
 import { asFamilyOnboardingApi } from '../familyOnboardingApi'
 import { resolveOnboardingGate, OnboardingGateDecision } from '../onboardingGate'
+import { FamilyOnboardingProvider } from '../FamilyOnboardingContext'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 
 export const Route = createRootRoute({
@@ -142,6 +143,13 @@ function AuthenticatedShell({
   const { isAdmin } = useAuthenticatedApi()
   // null = still checking
   const [gate, setGate] = useState<OnboardingGateDecision | null>(null)
+  // Ground truth from checkFamilyOnboarding(), independent of `gate`: an admin's `gate` is never
+  // 'create-family' (resolveOnboardingGate never auto-routes them there), but they still need to
+  // know whether they have a family, to decide whether UserMenu's manual entry point shows.
+  const [needsCreateFamily, setNeedsCreateFamily] = useState(false)
+  // Set true when the manual "Create your family" entry (FamilyOnboardingContext.openCreateFamily,
+  // e.g. from UserMenu) is used, rather than the automatic gate landing on 'create-family'.
+  const [manualCreateFamily, setManualCreateFamily] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -150,14 +158,15 @@ function AuthenticatedShell({
       try {
         // Family Memory Book fork: checkFamilyOnboarding() is not part of upstream's
         // AuthenticatedApi -- see docs/UPSTREAM.md's "Create-family onboarding integration" note.
-        // Always fetched alongside isOnboardingCompleted(), even for an admin (who
-        // checkFamilyOnboarding() short-circuits server-side): simpler than threading isAdmin's
-        // own async load state through this effect to conditionally skip it.
+        // Always fetched alongside isOnboardingCompleted(), admins included: resolveOnboardingGate
+        // is what keeps admins off the automatic 'create-family' route, not this call -- an admin's
+        // own needsCreateFamily is still true reporting, used below for the manual entry point.
         const [upstreamOnboardingCompleted, familyStatus] = await Promise.all([
           authenticatedApi.isOnboardingCompleted(),
           asFamilyOnboardingApi(authenticatedApi).checkFamilyOnboarding(),
         ])
         if (cancelled) return
+        setNeedsCreateFamily(familyStatus.needsCreateFamily)
         setGate(resolveOnboardingGate({
           isAdmin,
           upstreamOnboardingCompleted,
@@ -174,6 +183,12 @@ function AuthenticatedShell({
     return () => { cancelled = true }
   }, [authenticatedApi, isAdmin])
 
+  const handleFamilyCreated = () => {
+    setNeedsCreateFamily(false)
+    setManualCreateFamily(false)
+    setGate('app')
+  }
+
   // Still checking onboarding status
   if (gate === null) {
     return (
@@ -187,11 +202,13 @@ function AuthenticatedShell({
     return <OnboardingWizard onComplete={() => setGate('app')} />
   }
 
-  if (gate === 'create-family') {
+  // Automatic (non-admin, no family) or manual (any user, e.g. an admin via UserMenu) -- the same
+  // screen either way.
+  if (gate === 'create-family' || manualCreateFamily) {
     return (
       <CreateFamilyScreen
         authenticatedApi={authenticatedApi}
-        onComplete={() => setGate('app')}
+        onComplete={handleFamilyCreated}
       />
     )
   }
@@ -201,7 +218,10 @@ function AuthenticatedShell({
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
   const fullscreen = isWorkspaceEditor
   return (
-    <>
+    <FamilyOnboardingProvider
+      needsCreateFamily={needsCreateFamily}
+      openCreateFamily={() => setManualCreateFamily(true)}
+    >
       <AccountSelectionModal />
       {fullscreen ? (
         <main>
@@ -212,6 +232,6 @@ function AuthenticatedShell({
           <Outlet />
         </AppShell>
       )}
-    </>
+    </FamilyOnboardingProvider>
   )
 }
