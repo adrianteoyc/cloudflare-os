@@ -1,6 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
+import { callerScopedFacet } from "./caller-scope.js";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, GadgetCaller, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -334,6 +335,12 @@ type GadgetRecord = {
   // This gadget's bindings: binding name (as it appears in the gadget worker's `env`) -> binding
   // edge. Expected to stay small, so it's a map on the record rather than a separate collection.
   bindings: Record<string, BindingRecord>;
+
+  // Family Memory Book fork: when set, connectToGadget() hands each client a caller-scoped proxy
+  // that prepends a server-minted GadgetCaller to every method call (see caller-scope.ts). Set only
+  // by OverseerDurableObject.markGadgetCallerAware(), which only the Workshop's own createBook
+  // reaches -- never a user or agent. Absent on every upstream gadget.
+  callerAware?: true;
 
   // Present while the gadget is provisional: it was created within the given chat and follows
   // that chat's accept/reject lifecycle exactly like code changes (see mergeChanges() /
@@ -2480,6 +2487,24 @@ class OverseerImpl implements AgentHooks {
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
+  /**
+   * Family Memory Book fork: for a caller-aware gadget (GadgetRecord.callerAware), wraps the facet
+   * so every client call arrives with a server-minted GadgetCaller first -- see caller-scope.ts.
+   * Every other gadget gets the facet back untouched, exactly as before the fork.
+   */
+  async scopeFacetToCaller(gadgetId: WorkpieceId, facet: RpcStub<any>, clientUserId: string,
+      workspaceRole: CollaboratorRole): Promise<RpcStub<any>> {
+    if (!this.getGadgetRecord(gadgetId).callerAware) return facet;
+    let user = wrapDoStubForTelemetry(
+        this.users.get(this.users.idFromString(clientUserId)), this.logger);
+    let caller: GadgetCaller = {
+      userId: clientUserId,
+      clerkUserId: await user.getClerkUserId(),
+      workspaceRole,
+    };
+    return callerScopedFacet(facet, caller);
+  }
+
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number): Promise<RpcStub<any>> {
     let facet = this.getGadgetFacetFetcher(gadgetId, chatId);
 
@@ -6849,6 +6874,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Family Memory Book fork: flags a gadget as caller-aware (see GadgetRecord.callerAware and
+   * caller-scope.ts). DO-level, like initializeFromBlueprint(): reachable from the Workshop's
+   * own createBook, not from the client-facing Overseer interface. Defaults to the workspace's
+   * default gadget, which is the one a blueprint instantiation creates.
+   */
+  async markGadgetCallerAware(gadgetId?: WorkpieceId): Promise<void> {
+    let id = this.impl.resolveGadgetId(gadgetId);
+    let record = this.impl.getGadgetRecord(id);
+    record.callerAware = true;
+    this.impl.storage.gadgets.put(record);
+  }
+
+  /**
    * Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
    * AuthenticatedApi.newGadgetFromBlueprint() after creating (and opening) the DO.
    */
@@ -9334,7 +9372,8 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       chat_id: chatId,
       interaction_type: "gadget_ui_connected",
     });
-    return this.impl.getGadgetFacet(this.id, chatId);
+    let facet = await this.impl.getGadgetFacet(this.id, chatId);
+    return this.impl.scopeFacetToCaller(this.id, facet, this.clientUserId, "build");
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -9583,7 +9622,8 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
       user_id: this.#clientUser.id.toString(),
       interaction_type: "gadget_ui_connected",
     });
-    return this.impl.getGadgetFacet(this.id, undefined);
+    let facet = await this.impl.getGadgetFacet(this.id, undefined);
+    return this.impl.scopeFacetToCaller(this.id, facet, this.clientUserId, "use");
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {

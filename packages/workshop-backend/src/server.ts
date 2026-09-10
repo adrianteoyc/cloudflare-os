@@ -13,7 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -74,15 +74,6 @@ export { ExternalMessageGateway };
 interface FamilyGatekeeperServiceApi extends WorkerEntrypoint {
   needsCreateFamily(userId: string): Promise<boolean>;
   createFamily(userId: string, familyName: string): Promise<{ familyId: string }>;
-}
-
-/**
- * Family Memory Book fork: clerk-auth-gatekeeper's GatekeeperUserImpl, widened with the one method
- * (getClerkUserId()) it has beyond the shared GatekeeperUser interface. See
- * packages/clerk-auth-gatekeeper/src/clerk.ts.
- */
-interface ClerkGatekeeperUser extends GatekeeperUser {
-  getClerkUserId(): Promise<string | null>;
 }
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
@@ -204,10 +195,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
    * GATEKEEPER_CLERK) or hasn't finished that sign-in.
    */
   async #clerkUserId(): Promise<string | null> {
-    let account = await this.#user.getClerkGatekeeperAccount();
-    if (!account) return null;
-    let clerkAccount = account as unknown as Fetcher<ClerkGatekeeperUser>;
-    return clerkAccount.getClerkUserId();
+    return this.#user.getClerkUserId();
   }
 
   /**

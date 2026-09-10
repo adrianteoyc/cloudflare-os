@@ -3488,6 +3488,22 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
  */
 export type CollaboratorRole = "build" | "use";
 
+/**
+ * Family Memory Book fork: the identity the Workshop prepends as the FIRST argument of every
+ * method call a client makes on a caller-aware gadget's Durable Object (see
+ * workshop-backend/src/caller-scope.ts). The platform otherwise hands every collaborator the same
+ * anonymous stub, so gadget code could not tell users apart, let alone enforce per-user roles.
+ * Server-minted: nothing here comes from the client, so gadget code may trust it.
+ */
+export type GadgetCaller = {
+  /** The Workshop user id (the account's email). */
+  userId: string;
+  /** The user's Clerk id, when they signed in through the Clerk gatekeeper; null otherwise. */
+  clerkUserId: string | null;
+  /** The user's effective role on the workspace: "build" (owner-level) or "use" (collaborator). */
+  workspaceRole: CollaboratorRole;
+};
+
 /** One person currently connected to a gadget. */
 export type PresenceParticipant = {
   /** Opaque key matching this participant across add/remove events. */

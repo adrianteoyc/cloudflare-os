@@ -74,6 +74,15 @@ export const CLOUDFLARE_VENDOR_ID = "cloudflare";
  */
 export const CLERK_VENDOR_ID = "clerk";
 
+/**
+ * Family Memory Book fork: clerk-auth-gatekeeper's GatekeeperUserImpl, widened with the one method
+ * (getClerkUserId()) it has beyond the shared GatekeeperUser interface. See
+ * packages/clerk-auth-gatekeeper/src/clerk.ts.
+ */
+export interface ClerkGatekeeperUser extends GatekeeperUser {
+  getClerkUserId(): Promise<string | null>;
+}
+
 export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
   config: AiModelConfig;
@@ -635,6 +644,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return null;
+  }
+
+  /**
+   * Family Memory Book fork: this user's Clerk user id, via their linked Clerk account (see
+   * getClerkGatekeeperAccount below); null when they didn't sign in through Clerk. This is the id
+   * Clerk Organizations and the Family Gatekeeper key on, as opposed to the OS's own email-keyed
+   * user id.
+   */
+  async getClerkUserId(): Promise<string | null> {
+    let account = await this.getClerkGatekeeperAccount();
+    if (!account) return null;
+    let clerkAccount = account as unknown as Fetcher<ClerkGatekeeperUser>;
+    return clerkAccount.getClerkUserId();
   }
 
   /**
